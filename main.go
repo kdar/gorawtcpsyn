@@ -3,7 +3,6 @@ package main
 import (
   "code.google.com/p/gopacket"
   "code.google.com/p/gopacket/layers"
-  "errors"
   "flag"
   "fmt"
   "net"
@@ -12,30 +11,49 @@ import (
   "unsafe"
 )
 
-// get the local ip. very naive
-func localIP() (net.IP, error) {
-  tt, err := net.Interfaces()
+// get the local ip based on our destination ip
+func localIP(dstip net.IP) (net.IP, error) {
+  serverAddr, err := net.ResolveUDPAddr("udp", dstip.String()+":12345")
   if err != nil {
-    return nil, err
+    return net.IP{}, err
   }
-  for _, t := range tt {
-    aa, err := t.Addrs()
-    if err != nil {
-      return nil, err
-    }
-    for _, a := range aa {
-      ipnet, ok := a.(*net.IPNet)
-      if !ok {
-        continue
-      }
-      v4 := ipnet.IP.To4()
-      if v4 == nil || v4[0] == 127 { // loopback address
-        continue
-      }
-      return v4, nil
-    }
+
+  // We don't actually connect to anything, but we can determine
+  // based on our destination ip what source ip we should use.
+  con, err := net.DialUDP("udp", nil, serverAddr)
+  if udpaddr, ok := con.LocalAddr().(*net.UDPAddr); ok {
+    return udpaddr.IP, nil
   }
-  return nil, errors.New("cannot find local IP address")
+
+  return net.IP{}, err
+
+  // tt, err := net.Interfaces()
+  // if err != nil {
+  //   return nil, err
+  // }
+  // for _, t := range tt {
+  //   aa, err := t.Addrs()
+  //   if err != nil {
+  //     return nil, err
+  //   }
+  // ADDR:
+  //   for _, a := range aa {
+  //     var netip net.IP
+  //     switch typ := a.(type) {
+  //     case *net.IPNet:
+  //       netip = typ.IP.To4()
+  //     case *net.IPAddr:
+  //       netip = typ.IP
+  //     }
+
+  //     if netip == nil || netip[0] == 127 { // loopback address
+  //       continue ADDR
+  //     }
+
+  //     return netip, nil
+  //   }
+  // }
+  // return nil, errors.New("cannot find local IP address")
 }
 
 func main() {
@@ -46,12 +64,6 @@ func main() {
     os.Exit(-1)
   }
 
-  // get our local ip. this might not be the right address
-  srcip, err := localIP()
-  if err != nil {
-    panic(err)
-  }
-
   // parse the destination host and port from the command line args
   dstip := net.ParseIP(args[0]).To4()
   dport_, err := strconv.ParseInt(args[1], 10, 16)
@@ -59,6 +71,12 @@ func main() {
     panic(err)
   }
   dport := layers.TCPPort(dport_)
+
+  // get our local ip.
+  srcip, err := localIP(dstip)
+  if err != nil {
+    panic(err)
+  }
 
   // Our IPv4 header
   ip := &layers.IPv4{
@@ -115,7 +133,7 @@ func main() {
   }
 
   var b []byte
-  b = make([]byte, 52)
+  b = make([]byte, 152)
   n, addr, err := conn.ReadFrom(b)
   if err != nil {
     panic(err)
