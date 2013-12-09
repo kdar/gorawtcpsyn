@@ -45,17 +45,17 @@ func main() {
 
 	// Our IP header... not used, but necessary for TCP checksumming.
 	ip := &layers.IPv4{
-		SrcIP: localIP(dstip),
-		DstIP: dstip,
+		SrcIP:    localIP(dstip),
+		DstIP:    dstip,
 		Protocol: layers.IPProtocolTCP,
 	}
 	// Our TCP header
 	tcp := &layers.TCP{
-		SrcPort:  45677,
-		DstPort:  dport,
-		Seq:      1105024978,
-		SYN:      true,
-		Window:   14600,
+		SrcPort: 45677,
+		DstPort: dport,
+		Seq:     1105024978,
+		SYN:     true,
+		Window:  14600,
 	}
 	tcp.SetNetworkLayerForChecksum(ip)
 
