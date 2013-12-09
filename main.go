@@ -3,92 +3,52 @@ package main
 import (
 	"code.google.com/p/gopacket"
 	"code.google.com/p/gopacket/layers"
-	"flag"
-	"fmt"
+	"log"
 	"net"
 	"os"
 	"strconv"
-	"unsafe"
+	"time"
 )
 
 // get the local ip based on our destination ip
-func localIP(dstip net.IP) (net.IP, error) {
+func localIP(dstip net.IP) net.IP {
 	serverAddr, err := net.ResolveUDPAddr("udp", dstip.String()+":12345")
 	if err != nil {
-		return net.IP{}, err
+		panic(err)
 	}
 
 	// We don't actually connect to anything, but we can determine
 	// based on our destination ip what source ip we should use.
-	con, err := net.DialUDP("udp", nil, serverAddr)
-	if udpaddr, ok := con.LocalAddr().(*net.UDPAddr); ok {
-		return udpaddr.IP, nil
+	if con, err := net.DialUDP("udp", nil, serverAddr); err == nil {
+		if udpaddr, ok := con.LocalAddr().(*net.UDPAddr); ok {
+			return udpaddr.IP
+		}
 	}
-
-	return net.IP{}, err
-
-	// tt, err := net.Interfaces()
-	// if err != nil {
-	//   return nil, err
-	// }
-	// for _, t := range tt {
-	//   aa, err := t.Addrs()
-	//   if err != nil {
-	//     return nil, err
-	//   }
-	// ADDR:
-	//   for _, a := range aa {
-	//     var netip net.IP
-	//     switch typ := a.(type) {
-	//     case *net.IPNet:
-	//       netip = typ.IP.To4()
-	//     case *net.IPAddr:
-	//       netip = typ.IP
-	//     }
-
-	//     if netip == nil || netip[0] == 127 { // loopback address
-	//       continue ADDR
-	//     }
-
-	//     return netip, nil
-	//   }
-	// }
-	// return nil, errors.New("cannot find local IP address")
+	panic("could not get local ip: " + err.Error())
 }
 
 func main() {
-	flag.Parse()
-	args := flag.Args()
-	if len(args) != 2 {
-		fmt.Printf("Usage: %s <ip> <port>\n", os.Args[0])
+	if len(os.Args) != 3 {
+		log.Printf("Usage: %s <ip> <port>\n", os.Args[0])
 		os.Exit(-1)
 	}
+	log.Println("starting")
 
-	// parse the destination host and port from the command line args
-	dstip := net.ParseIP(args[0]).To4()
-	dport_, err := strconv.ParseInt(args[1], 10, 16)
-	if err != nil {
+	// parse the destination host and port from the command line os.Args
+	dstip := net.ParseIP(os.Args[1]).To4()
+	var dport layers.TCPPort
+	if d, err := strconv.ParseInt(os.Args[2], 10, 16); err != nil {
 		panic(err)
-	}
-	dport := layers.TCPPort(dport_)
-
-	// get our local ip.
-	srcip, err := localIP(dstip)
-	if err != nil {
-		panic(err)
+	} else {
+		dport = layers.TCPPort(d)
 	}
 
-	// Our IPv4 header
+	// Our IP header... not used, but necessary for TCP checksumming.
 	ip := &layers.IPv4{
-		Version:    4,
-		IHL:        5,
-		Id:         12345,
-		TTL:        64,
-		Protocol:   layers.IPProtocolTCP,
-		SrcIP:      srcip,
-		DstIP:      dstip,
+		SrcIP: localIP(dstip),
+		DstIP: dstip,
+		Protocol: layers.IPProtocolTCP,
 	}
-
 	// Our TCP header
 	tcp := &layers.TCP{
 		SrcPort:  45677,
@@ -97,16 +57,18 @@ func main() {
 		SYN:      true,
 		Window:   14600,
 	}
-	tcp.DataOffset = uint8(unsafe.Sizeof(tcp))
 	tcp.SetNetworkLayerForChecksum(ip)
 
+	// Serialize.  Note:  we only serialize the TCP layer, because the
+	// socket we get with net.ListenPacket wraps our data in IPv4 packets
+	// already.  We do still need the IP layer to compute checksums
+	// correctly, though.
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{
-		ComputeChecksums: true, // automatically compute checksums
-		FixLengths:       true, // automatically update length fields in layers
+		ComputeChecksums: true,
+		FixLengths:       true,
 	}
-
-	if err := gopacket.SerializeLayers(buf, opts, ip, tcp); err != nil {
+	if err := gopacket.SerializeLayers(buf, opts, tcp); err != nil {
 		panic(err)
 	}
 
@@ -114,32 +76,39 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
-	_, err = conn.WriteTo(buf.Bytes(), &net.IPAddr{IP: dstip})
-	if err != nil {
+	log.Println("writing request")
+	if _, err := conn.WriteTo(buf.Bytes(), &net.IPAddr{IP: dstip}); err != nil {
 		panic(err)
 	}
 
-	var b []byte
-	b = make([]byte, 152)
-	n, addr, err := conn.ReadFrom(b)
-	if err != nil {
+	// Set deadline so we don't wait forever.
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		panic(err)
 	}
 
-	if addr.String() == dstip.String() {
-		// Decode a packet
-		packet := gopacket.NewPacket(b[:n], layers.LayerTypeTCP, gopacket.Default)
-		// Get the TCP layer from this packet
-		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-			tcp, _ := tcpLayer.(*layers.TCP)
+	for {
+		b := make([]byte, 4096)
+		log.Println("reading from conn")
+		n, addr, err := conn.ReadFrom(b)
+		if err != nil {
+			log.Println("error reading packet: ", err)
+			return
+		} else if addr.String() == dstip.String() {
+			// Decode a packet
+			packet := gopacket.NewPacket(b[:n], layers.LayerTypeTCP, gopacket.Default)
+			// Get the TCP layer from this packet
+			if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+				tcp, _ := tcpLayer.(*layers.TCP)
 
-			//fmt.Printf("SYN: %v, ACK: %v, RST: %v\n", tcp.SYN, tcp.ACK, tcp.RST)
-			if tcp.SYN && tcp.ACK {
-				fmt.Printf("Port %d is OPEN\n", dport)
-			} else {
-				fmt.Printf("Port %d is CLOSED\n", dport)
+				if tcp.SYN && tcp.ACK {
+					log.Printf("Port %d is OPEN\n", dport)
+				} else {
+					log.Printf("Port %d is CLOSED\n", dport)
+				}
 			}
+			return
+		} else {
+			log.Printf("Got packet not matching addr")
 		}
 	}
 }
