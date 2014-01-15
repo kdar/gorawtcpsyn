@@ -10,49 +10,59 @@ import (
 	"time"
 )
 
-// get the local ip based on our destination ip
-func localIP(dstip net.IP) net.IP {
+// get the local ip and port based on our destination ip
+func localIPPort(dstip net.IP) (net.IP, int) {
 	serverAddr, err := net.ResolveUDPAddr("udp", dstip.String()+":12345")
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	// We don't actually connect to anything, but we can determine
 	// based on our destination ip what source ip we should use.
 	if con, err := net.DialUDP("udp", nil, serverAddr); err == nil {
 		if udpaddr, ok := con.LocalAddr().(*net.UDPAddr); ok {
-			return udpaddr.IP
+			return udpaddr.IP, udpaddr.Port
 		}
 	}
-	panic("could not get local ip: " + err.Error())
+	log.Fatal("could not get local ip: " + err.Error())
+	return nil, -1
 }
 
 func main() {
 	if len(os.Args) != 3 {
-		log.Printf("Usage: %s <ip> <port>\n", os.Args[0])
+		log.Printf("Usage: %s <host/ip> <port>\n", os.Args[0])
 		os.Exit(-1)
 	}
 	log.Println("starting")
 
-	// parse the destination host and port from the command line os.Args
-	dstip := net.ParseIP(os.Args[1]).To4()
-	var dport layers.TCPPort
-	if d, err := strconv.ParseInt(os.Args[2], 10, 16); err != nil {
-		panic(err)
-	} else {
-		dport = layers.TCPPort(d)
+	dstaddrs, err := net.LookupIP(os.Args[1])
+	if err != nil {
+		log.Fatal(err)
 	}
+
+	// parse the destination host and port from the command line os.Args
+	dstip := dstaddrs[0].To4()
+	var dstport layers.TCPPort
+	if d, err := strconv.ParseInt(os.Args[2], 10, 16); err != nil {
+		log.Fatal(err)
+	} else {
+		dstport = layers.TCPPort(d)
+	}
+
+	srcip, sport := localIPPort(dstip)
+	srcport := layers.TCPPort(sport)
+	log.Printf("using srcip: %v", srcip.String())
 
 	// Our IP header... not used, but necessary for TCP checksumming.
 	ip := &layers.IPv4{
-		SrcIP:    localIP(dstip),
+		SrcIP:    srcip,
 		DstIP:    dstip,
 		Protocol: layers.IPProtocolTCP,
 	}
 	// Our TCP header
 	tcp := &layers.TCP{
-		SrcPort: 45677,
-		DstPort: dport,
+		SrcPort: srcport,
+		DstPort: dstport,
 		Seq:     1105024978,
 		SYN:     true,
 		Window:  14600,
@@ -69,21 +79,21 @@ func main() {
 		FixLengths:       true,
 	}
 	if err := gopacket.SerializeLayers(buf, opts, tcp); err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	conn, err := net.ListenPacket("ip4:tcp", "0.0.0.0")
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 	log.Println("writing request")
 	if _, err := conn.WriteTo(buf.Bytes(), &net.IPAddr{IP: dstip}); err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	// Set deadline so we don't wait forever.
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	for {
@@ -100,13 +110,15 @@ func main() {
 			if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 				tcp, _ := tcpLayer.(*layers.TCP)
 
-				if tcp.SYN && tcp.ACK {
-					log.Printf("Port %d is OPEN\n", dport)
-				} else {
-					log.Printf("Port %d is CLOSED\n", dport)
+				if tcp.DstPort == srcport {
+					if tcp.SYN && tcp.ACK {
+						log.Printf("Port %d is OPEN\n", dstport)
+					} else {
+						log.Printf("Port %d is CLOSED\n", dstport)
+					}
+					return
 				}
 			}
-			return
 		} else {
 			log.Printf("Got packet not matching addr")
 		}
