@@ -43,7 +43,7 @@ func main() {
 	// parse the destination host and port from the command line os.Args
 	dstip := dstaddrs[0].To4()
 	var dstport layers.TCPPort
-	if d, err := strconv.ParseInt(os.Args[2], 10, 16); err != nil {
+	if d, err := strconv.ParseUint(os.Args[2], 10, 16); err != nil {
 		log.Fatal(err)
 	} else {
 		dstport = layers.TCPPort(d)
